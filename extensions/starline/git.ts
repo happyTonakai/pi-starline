@@ -6,6 +6,21 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 const GIT_COMMAND_TIMEOUT_MS = 2_000;
 
+/**
+ * Options env for every git call in this module. All of them are reads
+ * (`status`, `stash list`, `describe`, `diff`, `rev-parse`, `remote get-url`).
+ *
+ * Git's "optional locks" are write-backs those read commands normally perform:
+ * `status` and `diff` refresh file stat info and rewrite `.git/index`, which
+ * needs `.git/index.lock` — the same lock `git add` / `git commit` take. A probe
+ * firing while the user commits therefore makes one side fail with
+ * "Unable to create '.../index.lock': File exists". `GIT_OPTIONAL_LOCKS=0` skips
+ * the write-back: identical output, no index writes, no lock contention.
+ */
+function readOnlyGitEnv(): NodeJS.ProcessEnv {
+	return { ...process.env, GIT_OPTIONAL_LOCKS: "0" };
+}
+
 export type GitOperationState =
 	| "REBASING"
 	| "MERGING"
@@ -234,6 +249,7 @@ async function resolveGitPath(cwd: string, pathSpec: string): Promise<string | u
 		const { stdout } = await execFileAsync("git", ["rev-parse", "--git-path", pathSpec], {
 			cwd,
 			timeout: GIT_COMMAND_TIMEOUT_MS,
+			env: readOnlyGitEnv(),
 		});
 		const resolved = (typeof stdout === "string" ? stdout : String(stdout)).trim();
 		if (!resolved) return undefined;
@@ -310,15 +326,18 @@ export async function readGitStatus(
 			execFileAsync("git", ["status", "--porcelain=2", "--branch"], {
 				cwd,
 				timeout: GIT_COMMAND_TIMEOUT_MS,
+				env: readOnlyGitEnv(),
 			}),
 			execFileAsync("git", ["stash", "list"], {
 				cwd,
 				timeout: GIT_COMMAND_TIMEOUT_MS,
+				env: readOnlyGitEnv(),
 			}).catch(() => ({ stdout: "" })),
 			readExactTag
 				? execFileAsync("git", ["describe", "--tags", "--exact-match", "HEAD"], {
 						cwd,
 						timeout: GIT_COMMAND_TIMEOUT_MS,
+						env: readOnlyGitEnv(),
 					}).then(
 						(r) => ({ stdout: typeof r.stdout === "string" ? r.stdout : String(r.stdout) }),
 						() => ({ stdout: "" }),
@@ -328,6 +347,7 @@ export async function readGitStatus(
 				? execFileAsync("git", numstatArgs, {
 						cwd,
 						timeout: GIT_COMMAND_TIMEOUT_MS,
+						env: readOnlyGitEnv(),
 					}).then(
 						(r) => ({ stdout: typeof r.stdout === "string" ? r.stdout : String(r.stdout) }),
 						() => ({ stdout: "", failed: true as const }),
@@ -372,6 +392,7 @@ export async function readGitStatus(
 			const { stdout } = await execFileAsync("git", ["rev-parse", "--is-inside-work-tree"], {
 				cwd,
 				timeout: GIT_COMMAND_TIMEOUT_MS,
+				env: readOnlyGitEnv(),
 			});
 			const inside = (typeof stdout === "string" ? stdout : String(stdout)).trim();
 			if (inside !== "true") return { kind: "not_a_repo" };
@@ -436,6 +457,7 @@ export async function readGitHost(cwd: string): Promise<GitHost | undefined> {
 		const { stdout } = await execFileAsync("git", ["remote", "get-url", "origin"], {
 			cwd,
 			timeout: GIT_COMMAND_TIMEOUT_MS,
+			env: readOnlyGitEnv(),
 		});
 		host = parseGitRemoteHost(typeof stdout === "string" ? stdout : String(stdout));
 	} catch {
