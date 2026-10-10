@@ -168,7 +168,10 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	const refreshInteractiveState = (ctx: ExtensionContext, project = false) => {
-		if (!sessionLifecycle.isCurrent() || !ctx.hasUI) return;
+		// Footer state and the project (git) probe exist only to render the TUI footer:
+		// Pi makes setFooter() a no-op in RPC mode, so refreshing there would only spawn
+		// git processes for a footer nothing can display.
+		if (!sessionLifecycle.isCurrent() || !isTuiContext(ctx)) return;
 		syncFooterState(ctx);
 		if (project && currentConfig.features.statusLine) scheduleProjectRefresh(ctx);
 		refresh();
@@ -635,7 +638,9 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.on("thinking_level_select", syncInteractiveState);
 	pi.on("session_info_changed", syncInteractiveState);
-	pi.on("message_update", (event) => {
+	pi.on("message_update", (event, ctx) => {
+		// Live usage/cost context feeds the footer only.
+		if (!isTuiContext(ctx)) return;
 		liveContext.update(event.message);
 	});
 	pi.on("message_end", (event, ctx) => {

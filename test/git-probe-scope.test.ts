@@ -30,6 +30,64 @@ vi.mock("node:child_process", () => ({
 }));
 
 const { readGitHost, readGitStatus } = await import("../extensions/starline/git");
+const { LiveContextController } = await import("../extensions/starline/live-context");
+const { default: starline } = await import("../extensions/starline/index");
+
+type Handler = (event: unknown, ctx: unknown) => unknown;
+
+function makeTheme() {
+	return {
+		fg: (_color: string, text: string) => text,
+		bold: (text: string) => text,
+		italic: (text: string) => text,
+		underline: (text: string) => text,
+		strikethrough: (text: string) => text,
+		getThinkingBorderColor: () => (text: string) => text,
+	} as never;
+}
+
+function loadExtension() {
+	const handlers = new Map<string, Handler[]>();
+	starline({
+		on(eventName: string, handler: Handler) {
+			handlers.set(eventName, [...(handlers.get(eventName) ?? []), handler]);
+		},
+		registerCommand() {},
+		getThinkingLevel() {
+			return "off";
+		},
+	} as never);
+	return handlers;
+}
+
+async function emit(handlers: Map<string, Handler[]>, eventName: string, ctx: unknown) {
+	for (const handler of handlers.get(eventName) ?? []) {
+		await handler({ message: { role: "assistant" } }, ctx);
+	}
+}
+
+function makeContext(overrides: Record<string, unknown> = {}) {
+	let editorComponent: unknown;
+	return {
+		hasUI: true,
+		mode: "tui",
+		cwd: mkdtempSync(join(tmpdir(), "starline-git-cwd-")),
+		model: { id: "claude-sonnet", provider: "anthropic", contextWindow: 200_000 },
+		sessionManager: { getBranch: () => [], getSessionName: () => undefined },
+		getContextUsage: () => ({ tokens: 1000, contextWindow: 200_000, percent: 0.5 }),
+		ui: {
+			theme: makeTheme(),
+			setFooter() {},
+			setEditorComponent(factory: unknown) {
+				editorComponent = factory;
+			},
+			getEditorComponent() {
+				return editorComponent;
+			},
+		},
+		...overrides,
+	};
+}
 
 /** Calls recorded as [file, args, options]. */
 function gitCalls(): Array<[string, string[], { env?: NodeJS.ProcessEnv }]> {
@@ -81,5 +139,54 @@ describe("git probes are read-only", () => {
 		delete process.env.STARLINE_GIT_ENV_PROBE;
 
 		expect(gitCalls()[0]?.[2].env?.STARLINE_GIT_ENV_PROBE).toBe("kept");
+	});
+});
+
+describe("footer work follows the UI mode", () => {
+	it("probes git for the footer in TUI mode", async () => {
+		const handlers = loadExtension();
+		const ctx = makeContext({ mode: "tui" });
+
+		await emit(handlers, "session_start", ctx);
+		await vi.waitFor(() => {
+			expect(
+				gitCalls().some(([, args]) => args.join(" ") === "status --porcelain=2 --branch"),
+			).toBe(true);
+		});
+		await emit(handlers, "session_shutdown", ctx);
+	});
+
+	it("does not probe git outside TUI mode, where Pi cannot render a footer", async () => {
+		const handlers = loadExtension();
+		const ctx = makeContext({ mode: "rpc", hasUI: true });
+
+		await emit(handlers, "session_start", ctx);
+		await emit(handlers, "agent_start", ctx);
+		await emit(handlers, "tool_execution_start", ctx);
+		await emit(handlers, "tool_execution_end", ctx);
+		await emit(handlers, "message_update", ctx);
+		await emit(handlers, "agent_end", ctx);
+
+		expect(execFileMock).not.toHaveBeenCalled();
+		await emit(handlers, "session_shutdown", ctx);
+	});
+
+	it("updates live usage context only in TUI mode", async () => {
+		const updateSpy = vi.spyOn(LiveContextController.prototype, "update");
+
+		const rpcHandlers = loadExtension();
+		const rpcCtx = makeContext({ mode: "rpc", hasUI: true });
+		await emit(rpcHandlers, "session_start", rpcCtx);
+		await emit(rpcHandlers, "message_update", rpcCtx);
+		await emit(rpcHandlers, "session_shutdown", rpcCtx);
+		expect(updateSpy).not.toHaveBeenCalled();
+
+		const tuiHandlers = loadExtension();
+		const tuiCtx = makeContext({ mode: "tui" });
+		await emit(tuiHandlers, "session_start", tuiCtx);
+		await emit(tuiHandlers, "message_update", tuiCtx);
+		expect(updateSpy).toHaveBeenCalledTimes(1);
+
+		await emit(tuiHandlers, "session_shutdown", tuiCtx);
 	});
 });
